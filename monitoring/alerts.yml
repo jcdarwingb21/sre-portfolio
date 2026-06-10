@@ -1,0 +1,40 @@
+groups:
+  - name: sre-portfolio-alerts
+    interval: 30s
+    rules:
+
+      # SLO: 99.5% of requests must succeed (error budget = 0.5%)
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(app_requests_total{status=~"5.."}[5m]))
+          /
+          sum(rate(app_requests_total[5m])) > 0.005
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Error rate exceeds SLO threshold"
+          description: "Error rate is {{ $value | humanizePercentage }} — SLO budget burning fast."
+
+      # SLO: p99 latency must be under 500ms
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(app_request_latency_seconds_bucket[5m])) by (le, endpoint)
+          ) > 0.5
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p99 latency above 500ms on {{ $labels.endpoint }}"
+          description: "p99 latency is {{ $value | humanizeDuration }}."
+
+      # App is down — no scrape data
+      - alert: AppDown
+        expr: up{job="sre-portfolio-app"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "sre-portfolio-app is unreachable"
+          description: "Prometheus cannot scrape the app. Check container health."

@@ -1,0 +1,108 @@
+name: CI pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_NAME: sre-portfolio-app
+
+jobs:
+  # ── 1. Run tests ─────────────────────────────────────────────────────────────
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r app/requirements.txt
+
+      - name: Run pytest
+        run: pytest app/test_main.py -v --tb=short
+
+  # ── 2. Build Docker image ────────────────────────────────────────────────────
+  build:
+    name: Build image
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=ref,event=branch
+
+      - name: Build Docker image
+        run: docker build -t $IMAGE_NAME:${{ steps.meta.outputs.version }} ./app
+
+      - name: Smoke test container
+        run: |
+          docker run -d --name smoke -p 5000:5000 $IMAGE_NAME:${{ steps.meta.outputs.version }}
+          sleep 5
+          curl --fail http://localhost:5000/health
+          curl --fail http://localhost:5000/ready
+          docker stop smoke
+
+  # ── 3. Security scan ─────────────────────────────────────────────────────────
+  security-scan:
+    name: Trivy security scan
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image for scan
+        run: docker build -t $IMAGE_NAME:scan ./app
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ env.IMAGE_NAME }}:scan"
+          format: table
+          exit-code: "0"
+          severity: CRITICAL,HIGH
+
+  # ── 4. Deploy to staging (on main push, requires AWS secrets) ────────────────
+  # Uncomment when AWS credentials are configured in GitHub Secrets:
+  # deploy-staging:
+  #   name: Deploy to staging
+  #   needs: security-scan
+  #   runs-on: ubuntu-latest
+  #   environment: staging
+  #   if: github.ref == 'refs/heads/main'
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Configure AWS credentials
+  #       uses: aws-actions/configure-aws-credentials@v4
+  #       with:
+  #         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #         aws-region: us-east-1
+  #     - name: Login to ECR
+  #       uses: aws-actions/amazon-ecr-login@v2
+  #     - name: Push image to ECR
+  #       run: |
+  #         docker build -t ${{ secrets.ECR_REGISTRY }}/sre-portfolio:${{ github.sha }} ./app
+  #         docker push ${{ secrets.ECR_REGISTRY }}/sre-portfolio:${{ github.sha }}
+  #     - name: Update ECS service
+  #       run: |
+  #         aws ecs update-service \
+  #           --cluster sre-portfolio-staging \
+  #           --service sre-portfolio \
+  #           --force-new-deployment
